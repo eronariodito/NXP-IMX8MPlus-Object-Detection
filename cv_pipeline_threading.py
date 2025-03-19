@@ -13,6 +13,7 @@ import time
 import yaml
 import threading
 import queue
+import utils.yolo_v8_v11_postprocessing as postprocess
 
 class GstOpenCVPipeline:
     def __init__(self):
@@ -46,7 +47,8 @@ class GstOpenCVPipeline:
             "appsrc name=opencv_src format=time is-live=true do-timestamp=true block=false "
             f'caps=video/x-raw,format=BGRA,width={self.image_width},height={self.image_height} ! '
             "queue max-size-buffers=3 leaky=downstream ! "
-            "imxvideoconvert_g2d ! fpsdisplaysink name=display video-sink=autovideosink sync=true text-overlay=true signal-fps-measurements=true"
+            'imxvideoconvert_g2d !  textoverlay name=text_overlay text=" " valignment=bottom halignment=center font-desc="Arial, 36" !'
+            "fpsdisplaysink name=display video-sink=autovideosink sync=true text-overlay=false signal-fps-measurements=true"
         )
         
         # Create the sink pipeline
@@ -55,7 +57,28 @@ class GstOpenCVPipeline:
         # Get the appsrc element
         self.appsrc = self.sink_pipeline.get_by_name("opencv_src")
 
-        path = os.getcwd() + "/yolov8n_full_integer_quant2.tflite"
+        # Connect to display fps-measurements
+        textoverlay = self.sink_pipeline.get_by_name("text_overlay")
+        if textoverlay:
+            # Font selection - professional, readable font
+            textoverlay.set_property("font-desc", "Arial Bold 12")  
+            
+            # Text styling
+            textoverlay.set_property("valignment", "top")  # Vertical alignment
+            textoverlay.set_property("halignment", "left")    # Horizontal alignment
+            textoverlay.set_property("line-alignment", "left")
+            textoverlay.set_property("xpad", 20)              # Horizontal padding
+            textoverlay.set_property("ypad", 20)              # Vertical padding
+            
+            # Colors and visibility
+            textoverlay.set_property("color", 0xFFFFFFFF)     # White text (ARGB)
+            textoverlay.set_property("outline-color", 0xFF000000)  # Black outline
+            textoverlay.set_property("shaded-background", True)    # Background shading
+            #textoverlay.set_property("shadow", True)          # Text shadow
+
+        self.sink_pipeline.get_by_name("display").connect("fps-measurements", self.on_fps_measurement)
+
+        path = os.getcwd() + "/models/yolov8n_full_integer_quant_416.tflite"
 
         delegate_lib = "/usr/lib/libvx_delegate.so"
 
@@ -95,11 +118,16 @@ class GstOpenCVPipeline:
 
         # Generate a color palette for the classes
         self.color_palette = np.random.uniform(0, 255, size=(len(self.classes), 3))
-        
+    
+    def on_fps_measurement(self, sink, fps, droprate, avgfps):
+        new_text = f"FPS: {fps:.2f}\nDroprate: {droprate:.2f}\nAvg FPS: {avgfps:.2f}"
+        self.sink_pipeline.get_by_name("text_overlay").set_property("text", new_text)
+        #print(f"FPS: {fps:.2f}, Droprate: {droprate:.2f}, Avg FPS: {avgfps:.2f}")
+        return True
                 
     def on_new_sample(self, appsink):
         
-	# Get the sample from appsink
+	    # Get the sample from appsink
         sample = appsink.emit("pull-sample")
         if not sample:
             return Gst.FlowReturn.ERROR
@@ -173,93 +201,6 @@ class GstOpenCVPipeline:
 
         return frame, (top / frame.shape[0], left / frame.shape[1])
 
-    def postprocess(self, frame, outputs, pad) :
-        """
-        Process model outputs to extract and visualize detections.
-
-        Args:
-            img (np.ndarray): The original input image.
-            outputs (np.ndarray): Raw model outputs.
-            pad (Tuple[float, float]): Padding ratios from preprocessing.
-
-        Returns:
-            (np.ndarray): The input image with detections drawn on it.
-        """
-        # Adjust coordinates based on padding and scale to original image size
-        outputs[:, 0] -= pad[1]
-        outputs[:, 1] -= pad[0]
-        outputs[:, :4] *= max(frame.shape)
-
-        # Transform outputs to [x, y, w, h] format
-        outputs = outputs.transpose(0, 2, 1)
-        outputs[..., 0] -= outputs[..., 2] / 2  # x center to top-left x
-        outputs[..., 1] -= outputs[..., 3] / 2  # y center to top-left y
-
-        for out in outputs:
-            # Get scores and apply confidence threshold
-            scores = out[:, 4:].max(-1)
-            keep = scores > self.conf
-            boxes = out[keep, :4]
-            scores = scores[keep]
-            class_ids = out[keep, 4:].argmax(-1)
-
-            # Apply non-maximum suppression
-            indices = cv2.dnn.NMSBoxes(boxes, scores, self.conf, self.iou)
-
-            if len(indices) > 0:
-                indices.flatten()
-            else:
-                return frame
-
-            # Draw detections that survived NMS
-            [self.draw_detections(frame, boxes[i], scores[i], class_ids[i]) for i in indices]
-
-        return frame
-
-    def draw_detections(self, frame, box, score, class_id):
-        """
-        Draws bounding boxes and labels on the input image based on the detected objects.
-
-        Args:
-            img: The input image to draw detections on.
-            box: Detected bounding box.
-            score: Corresponding detection score.
-            class_id: Class ID for the detected object.
-
-        Returns:
-            None
-        """
-
-        # Extract the coordinates of the bounding box
-        x1, y1, w, h = box
-
-        # Retrieve the color for the class ID
-        color = self.color_palette[class_id]
-
-        # Draw the bounding box on the image
-        cv2.rectangle(frame, (int(x1), int(y1)), (int(x1 + w), int(y1 + h)), color, 2)
-
-        # Create the label text with class name and score
-        label = f"{self.classes[class_id]}: {score:.2f}"
-
-        # Calculate the dimensions of the label text
-        (label_width, label_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-
-        # Calculate the position of the label text
-        label_x = x1
-        label_y = y1 - 10 if y1 - 10 > label_height else y1 + 10
-
-        # Draw a filled rectangle as the background for the label text
-        cv2.rectangle(
-            frame,
-            (int(label_x), int(label_y - label_height)),
-            (int(label_x + label_width), int(label_y + label_height)),
-            color,
-            cv2.FILLED,
-        )
-
-        # Draw the label text on the image
-        cv2.putText(frame, label, (int(label_x), int(label_y)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
 
     def infer_thread(self, queue):
         while True:
@@ -294,7 +235,7 @@ class GstOpenCVPipeline:
                 outputs, pad, frame, map_info, buf = item
                 
                 outputs = (outputs.astype(np.float32) - self.zero_point) * self.scale
-                self.postprocess(frame, outputs, pad)
+                postprocess.postprocess(self, frame, outputs, pad)
 
                 frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGRA)
             
@@ -310,12 +251,6 @@ class GstOpenCVPipeline:
 
 
     def run(self):
-        self.inference_thread = threading.Thread(target=self.infer_thread, args=(self.input_queue,), daemon=True )
-        self.inference_thread.start()
-
-        self.postprocess_thread = threading.Thread(target=self.postprocess_thread, args=(self.output_queue,), daemon=True )
-        self.postprocess_thread.start()
-
         # Start the pipelines
         self.source_pipeline.set_state(Gst.State.PLAYING)
         self.sink_pipeline.set_state(Gst.State.PLAYING)
@@ -323,6 +258,13 @@ class GstOpenCVPipeline:
         
         # Create GLib MainLoop
         self.loop = GLib.MainLoop()
+
+        self.inference_thread = threading.Thread(target=self.infer_thread, args=(self.input_queue,), daemon=True )
+        self.inference_thread.start()
+
+        self.postprocess_thread = threading.Thread(target=self.postprocess_thread, args=(self.output_queue,), daemon=True )
+        self.postprocess_thread.start()
+
         
         try:
             # Run the main loop

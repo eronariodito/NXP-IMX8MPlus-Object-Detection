@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+
+"""
+Pipeline with nnstreamer
+- need custom post processing python code for other models
+- Python causes GIL when nnstreamer is run through python (Running two python core at the same time not possible)
+"""
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
