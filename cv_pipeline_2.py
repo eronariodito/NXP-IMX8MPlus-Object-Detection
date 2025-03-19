@@ -54,7 +54,7 @@ class GstOpenCVPipeline:
         # Get the appsrc element
         self.appsrc = self.sink_pipeline.get_by_name("opencv_src")
 
-        path = os.getcwd() + "/yolo11n_full_integer_quant_224.tflite"
+        path = os.getcwd() + "/yolov8n_full_integer_quant_224.tflite"
 
         delegate_lib = "/usr/lib/libvx_delegate.so"
 
