@@ -25,6 +25,9 @@ class GstOpenCVPipeline:
         self.image_width = 1280 
         self.image_height = 720
 
+        self.int8 = True
+
+
         self.input_queue = queue.Queue()
         self.output_queue = queue.Queue()
 
@@ -108,7 +111,6 @@ class GstOpenCVPipeline:
         self.input_shape = self.input_details[0]['shape']
         self.scale, self.zero_point = self.output_details[0]["quantization"]
         self.in_scale, self.in_zero_point = self.input_details[0]["quantization"]
-        print(self.scale, self.zero_point)
 
         with open("coco128.yaml", "r") as f:
             data = yaml.safe_load(f)
@@ -155,7 +157,9 @@ class GstOpenCVPipeline:
         frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
         
         input_data, pad = self.preprocess(frame)
-        input_data = (input_data / self.in_scale + self.in_zero_point).astype(np.int8)
+        
+        if self.int8:
+            input_data = (input_data / self.in_scale + self.in_zero_point).astype(np.int8)
 
         self.input_queue.put((input_data, pad, frame, map_info, buf))
        
@@ -234,7 +238,8 @@ class GstOpenCVPipeline:
 
                 outputs, pad, frame, map_info, buf = item
                 
-                outputs = (outputs.astype(np.float32) - self.zero_point) * self.scale
+                if self.int8:
+                    outputs = (outputs.astype(np.float32) - self.zero_point) * self.scale
                 postprocess.postprocess(self, frame, outputs, pad)
 
                 frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGRA)
@@ -254,8 +259,7 @@ class GstOpenCVPipeline:
         # Start the pipelines
         self.source_pipeline.set_state(Gst.State.PLAYING)
         self.sink_pipeline.set_state(Gst.State.PLAYING)
-        
-        
+               
         # Create GLib MainLoop
         self.loop = GLib.MainLoop()
 
